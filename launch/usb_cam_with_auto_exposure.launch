@@ -1,0 +1,21 @@
+<launch>
+  <node name="usb_cam" pkg="usb_cam" type="usb_cam_node" output="screen" >
+    <param name="video_device" value="/dev/video0" />
+    <param name="image_width" value="640" />
+    <param name="image_height" value="480" />
+    <param name="pixel_format" value="yuyv" />
+    <param name="camera_frame_id" value="usb_cam" />
+    <param name="io_method" value="mmap"/>
+    
+    <!-- Auto exposure parameters -->
+    <param name="custom_auto_exposure" value="true" />
+    <param name="auto_exposure_enabled" value="true" />
+    <param name="custom_auto_exposure_parameter" value="exposure_absolute" />
+    <param name="target_brightness" value="128.0" />
+    <param name="brightness_tolerance" value="10.0" />
+    <param name="min_exposure" value="10" />
+    <param name="max_exposure" value="800" />
+    <param name="exposure_step" value="5" />
+    <param name="auto_exposure_frames_skip" value="10" />
+  </node>
+</launch>

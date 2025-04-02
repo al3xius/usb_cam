@@ -58,7 +58,7 @@ public:
   std::string video_device_name_, io_method_name_, pixel_format_name_, camera_name_, camera_info_url_, color_format_name_, custom_auto_exposure_parameter_ ;
   //std::string start_service_name_, start_service_name_;
   bool streaming_status_;
-  int image_width_, image_height_, framerate_, exposure_, focus_;
+  int image_width_, image_height_, framerate_, exposure_, focus_, current_custom_exposure_;
   bool autofocus_, custom_auto_exposure_;
   boost::shared_ptr<camera_info_manager::CameraInfoManager> cinfo_;
 
@@ -77,6 +77,12 @@ public:
   
   // Service to update camera parameters from dictionary
   ros::ServiceServer service_update_params_;
+
+  // Auto exposure parameters
+  int min_exposure_, max_exposure_, target_exposure_;
+  double target_brightness_, brightness_tolerance_;
+  int auto_exposure_frames_skip_;
+  int frames_since_last_adjustment_;
 
   // Method to apply V4L parameters from a dictionary
   void loadV4LParametersFromDict() {
@@ -144,6 +150,10 @@ public:
             }
           }
         }
+
+        if (param_name == custom_auto_exposure_parameter_) {
+          current_custom_exposure_ = static_cast<int>(value);
+        }
       }
     }
   }
@@ -171,7 +181,14 @@ public:
       node_("~"), 
       camera_connected_(false),
       reconnect_delay_ms_(500),  // Start with a 500ms reconnect delay
-      max_reconnect_delay_ms_(30000)  // Maximum 30 second delay between reconnect attempts
+      max_reconnect_delay_ms_(30000),  // Maximum 30 second delay between reconnect attempts
+      min_exposure_(0),
+      max_exposure_(255),
+      target_exposure_(100),
+      target_brightness_(128.0),
+      brightness_tolerance_(10.0),
+      auto_exposure_frames_skip_(5),
+      frames_since_last_adjustment_(0)
   {
     ROS_INFO("Starting usb_cam node with auto exposure...");
     // advertise the main image topic
@@ -223,6 +240,13 @@ public:
     node_.param("reconnect_delay_ms", reconnect_delay_ms_, 500);
     node_.param("max_reconnect_delay_ms", max_reconnect_delay_ms_, 30000);
     
+    // Get auto exposure parameters
+    node_.param("target_brightness", target_brightness_, 128.0);
+    node_.param("brightness_tolerance", brightness_tolerance_, 10.0);
+    node_.param("min_exposure", min_exposure_, 0);
+    node_.param("max_exposure", max_exposure_, 255);
+    node_.param("auto_exposure_frames_skip", auto_exposure_frames_skip_, 5);
+
     // Set initial connection status
     publish_camera_status("CONNECTING");
 
@@ -339,6 +363,114 @@ public:
     cam_.shutdown();
   }
 
+  // Calculate the average brightness of an image
+  double calculateAverageBrightness(const sensor_msgs::Image& img) {
+    // Only process a subset of pixels for efficiency
+    const int sample_step = 10; // Sample every 10th pixel in both dimensions
+    long int sum = 0;
+    long int count = 0;
+
+    // Handle different encoding formats
+    if (img.encoding == "rgb8" || img.encoding == "bgr8") {
+      for (size_t y = 0; y < img.height; y += sample_step) {
+        for (size_t x = 0; x < img.width; x += sample_step) {
+          size_t index = y * img.step + x * 3;
+          // Average of RGB channels
+          int r = img.data[index];
+          int g = img.data[index + 1];
+          int b = img.data[index + 2];
+          // Convert RGB to luminance (standard coefficients)
+          int luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+          sum += luminance;
+          count++;
+        }
+      }
+    } else if (img.encoding == "mono8" || img.encoding == "8UC1") {
+      // Grayscale image
+      for (size_t y = 0; y < img.height; y += sample_step) {
+        for (size_t x = 0; x < img.width; x += sample_step) {
+          size_t index = y * img.step + x;
+          sum += img.data[index];
+          count++;
+        }
+      }
+    } else if (img.encoding == "yuyv" || img.encoding == "uyvy") {
+      // YUV format - just sample Y component
+      for (size_t y = 0; y < img.height; y += sample_step) {
+        for (size_t x = 0; x < img.width; x += sample_step) {
+          size_t index = y * img.step + x * 2; // YUV formats have 2 bytes per pixel
+          sum += img.data[index]; // Y component
+          count++;
+        }
+      }
+    } else {
+      // If we can't determine the format, just sample and average all bytes
+      for (size_t y = 0; y < img.height; y += sample_step) {
+        for (size_t x = 0; x < img.width * (img.step / img.width); x += sample_step) {
+          size_t index = y * img.step + x;
+          if (index < img.data.size()) {
+            sum += img.data[index];
+            count++;
+          }
+        }
+      }
+    }
+
+    return count > 0 ? static_cast<double>(sum) / count : 0.0;
+  }
+
+  // Adjust exposure based on image brightness
+  void adjustExposure(double current_brightness) {
+    // Skip if auto exposure is disabled
+    if (!custom_auto_exposure_) return;
+
+    ROS_INFO("Adjusting exposure based on brightness: %.1f, current: %d", current_brightness, current_custom_exposure_);
+
+    // Calculate brightness error
+    double brightness_error = target_brightness_ - current_brightness;
+
+    ROS_INFO("Brightness Error %.1f.", 
+      brightness_error);
+    
+    // Skip adjustment if within tolerance
+    if (std::abs(brightness_error) <= brightness_tolerance_) {
+      return;
+    }
+    
+    // Calculate proportional adjustment
+    double gain = 1.5; // Adjust this value to control responsiveness
+    node_.param("exposure_gain", gain, 1.5); // Allow param override
+    
+    int adjustment = static_cast<int>(brightness_error * gain);
+    
+    // Apply adjustment based on camera type
+    int new_exposure;
+    if (custom_auto_exposure_parameter_ == "exposure_absolute" || 
+        custom_auto_exposure_parameter_ == "exposure") {
+      // Standard behavior - higher value means more exposure
+      new_exposure = current_custom_exposure_ - adjustment;
+    } else {
+      // Some cameras may use inverted values
+      new_exposure = current_custom_exposure_ + adjustment;
+    }
+
+    // Clamp exposure to valid range
+    new_exposure = std::max(min_exposure_, std::min(max_exposure_, new_exposure));
+    
+    // Only update if value changed
+    if (new_exposure != current_custom_exposure_) {
+      ROS_INFO("Adjusting %s: %d -> %d (brightness: %.1f, target: %.1f, error: %.1f)",
+              custom_auto_exposure_parameter_.c_str(), current_custom_exposure_, new_exposure, 
+              current_brightness, target_brightness_, brightness_error);
+      try {
+        cam_.set_v4l_parameter(custom_auto_exposure_parameter_, new_exposure);
+        current_custom_exposure_ = new_exposure;
+      } catch (std::exception &e) {
+        ROS_ERROR("Failed to set exposure: %s", e.what());
+      }
+    }
+  }
+
   bool take_and_send_image()
   {
     // grab the image
@@ -360,6 +492,16 @@ public:
 
     // publish the image
     image_pub_.publish(img_, *ci);
+
+    // Handle auto exposure if enabled
+    if (custom_auto_exposure_) {
+      frames_since_last_adjustment_++;
+      if (frames_since_last_adjustment_ >= auto_exposure_frames_skip_) {
+        frames_since_last_adjustment_ = 0;
+        double avg_brightness = calculateAverageBrightness(img_);
+        adjustExposure(avg_brightness);
+      }
+    }
 
     return true;
   }
