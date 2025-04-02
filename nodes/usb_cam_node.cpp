@@ -54,19 +54,95 @@ public:
   image_transport::CameraPublisher image_pub_;
 
   // parameters
-  std::string video_device_name_, io_method_name_, pixel_format_name_, camera_name_, camera_info_url_, color_format_name_ ;
+  std::string video_device_name_, io_method_name_, pixel_format_name_, camera_name_, camera_info_url_, color_format_name_, custom_auto_exposure_parameter_ ;
   //std::string start_service_name_, start_service_name_;
   bool streaming_status_;
-  int image_width_, image_height_, framerate_, exposure_, brightness_, contrast_, saturation_, sharpness_, focus_,
-      white_balance_, gain_;
-  bool autofocus_, autoexposure_, auto_white_balance_;
+  int image_width_, image_height_, framerate_, exposure_, focus_;
+  bool autofocus_, custom_auto_exposure_;
   boost::shared_ptr<camera_info_manager::CameraInfoManager> cinfo_;
 
   UsbCam cam_;
 
   ros::ServiceServer service_start_, service_stop_;
+  
+  // Service to update camera parameters from dictionary
+  ros::ServiceServer service_update_params_;
 
-
+  // Method to apply V4L parameters from a dictionary
+  void loadV4LParametersFromDict() {
+    XmlRpc::XmlRpcValue v4l_params;
+    if (node_.getParam("v4l_params", v4l_params) && v4l_params.getType() == XmlRpc::XmlRpcValue::TypeStruct) {
+      ROS_INFO("Loading V4L parameters from dictionary");
+      
+      for (XmlRpc::XmlRpcValue::iterator it = v4l_params.begin(); it != v4l_params.end(); ++it) {
+        std::string param_name = it->first;
+        XmlRpc::XmlRpcValue& value = it->second;
+        
+        // Handle different types of parameters
+        switch (value.getType()) {
+          case XmlRpc::XmlRpcValue::TypeInt:
+            ROS_INFO("Setting V4L parameter %s = %d", param_name.c_str(), static_cast<int>(value));
+            cam_.set_v4l_parameter(param_name, static_cast<int>(value));
+            break;
+            
+          case XmlRpc::XmlRpcValue::TypeBoolean:
+            ROS_INFO("Setting V4L parameter %s = %d", param_name.c_str(), static_cast<bool>(value) ? 1 : 0);
+            cam_.set_v4l_parameter(param_name, static_cast<bool>(value) ? 1 : 0);
+            break;
+            
+          case XmlRpc::XmlRpcValue::TypeString:
+            {
+              std::string str_value = static_cast<std::string>(value);
+              // Try to convert string to integer if it looks like a number
+              char* end;
+              long int_value = strtol(str_value.c_str(), &end, 10);
+              if (*end == '\0') {
+                // Conversion successful, it's a numeric string
+                ROS_INFO("Setting V4L parameter %s = %ld", param_name.c_str(), int_value);
+                cam_.set_v4l_parameter(param_name, static_cast<int>(int_value));
+              } else {
+                ROS_INFO("Setting V4L parameter %s = %s", param_name.c_str(), str_value.c_str());
+                cam_.set_v4l_parameter(param_name, str_value);
+              }
+            }
+            break;
+            
+          default:
+            ROS_WARN("Unsupported parameter type for %s", param_name.c_str());
+            break;
+        }
+        
+        // Special handling for auto controls
+        if (param_name == "autofocus") {
+          bool new_autofocus = false;
+          if (value.getType() == XmlRpc::XmlRpcValue::TypeBoolean) {
+            new_autofocus = static_cast<bool>(value);
+          } else if (value.getType() == XmlRpc::XmlRpcValue::TypeInt) {
+            new_autofocus = static_cast<int>(value) != 0;
+          } else if (value.getType() == XmlRpc::XmlRpcValue::TypeString) {
+            std::string str_value = static_cast<std::string>(value);
+            new_autofocus = (str_value == "true" || str_value == "1");
+          }
+          
+          if (new_autofocus != autofocus_) {
+            autofocus_ = new_autofocus;
+            if (autofocus_) {
+              cam_.set_auto_focus(1);
+              cam_.set_v4l_parameter("focus_auto", 1);
+            } else {
+              cam_.set_v4l_parameter("focus_auto", 0);
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  // Service callback to update parameters
+  bool updateParametersCallback(std_srvs::Empty::Request &req, std_srvs::Empty::Response &res) {
+    loadV4LParametersFromDict();
+    return true;
+  }
 
   bool service_start_cap(std_srvs::Empty::Request  &req, std_srvs::Empty::Response &res )
   {
@@ -84,16 +160,13 @@ public:
   UsbCamNode() :
       node_("~")
   {
+    ROS_INFO("Starting usb_cam node with auto exposure...");
     // advertise the main image topic
     image_transport::ImageTransport it(node_);
     image_pub_ = it.advertiseCamera("image_raw", 1);
 
     // grab the parameters
     node_.param("video_device", video_device_name_, std::string("/dev/video0"));
-    node_.param("brightness", brightness_, -1); //0-255, -1 "leave alone"
-    node_.param("contrast", contrast_, -1); //0-255, -1 "leave alone"
-    node_.param("saturation", saturation_, -1); //0-255, -1 "leave alone"
-    node_.param("sharpness", sharpness_, -1); //0-255, -1 "leave alone"
     // possible values: mmap, read, userptr
     node_.param("io_method", io_method_name_, std::string("mmap"));
     node_.param("image_width", image_width_, 640);
@@ -103,16 +176,13 @@ public:
     node_.param("pixel_format", pixel_format_name_, std::string("mjpeg"));
     // possible values: yuv420p, yuv422p
     node_.param("color_format", color_format_name_, std::string("yuv422p"));
-    // enable/disable autofocus
-    node_.param("autofocus", autofocus_, false);
-    node_.param("focus", focus_, -1); //0-255, -1 "leave alone"
-    // enable/disable autoexposure
-    node_.param("autoexposure", autoexposure_, true);
-    node_.param("exposure", exposure_, 100);
-    node_.param("gain", gain_, -1); //0-100?, -1 "leave alone"
-    // enable/disable auto white balance temperature
-    node_.param("auto_white_balance", auto_white_balance_, true);
-    node_.param("white_balance", white_balance_, 4000);
+
+    // parameters for custom auto exposure
+    node_.param("custom_auto_exposure", custom_auto_exposure_, false);
+    node_.param("custom_auto_exposure_parameter", custom_auto_exposure_parameter_, std::string("exposure_time_absolute"));
+
+
+    
 
     // load the camera info
     node_.param("camera_frame_id", img_.header.frame_id, std::string("head_camera"));
@@ -123,6 +193,7 @@ public:
     // create Services
     service_start_ = node_.advertiseService("start_capture", &UsbCamNode::service_start_cap, this);
     service_stop_ = node_.advertiseService("stop_capture", &UsbCamNode::service_stop_cap, this);
+    service_update_params_ = node_.advertiseService("update_parameters", &UsbCamNode::updateParametersCallback, this);
 
     // check for default camera info
     if (!cinfo_->isCalibrated())
@@ -168,53 +239,13 @@ public:
 
     // start the camera
     cam_.start(video_device_name_.c_str(), io_method, pixel_format, color_format, image_width_,
-		     image_height_, framerate_);
+         image_height_, framerate_);
 
-    // set camera parameters
-    if (brightness_ >= 0)
-    {
-      cam_.set_v4l_parameter("brightness", brightness_);
-    }
+    // Load and apply V4L parameters from dictionary
+    loadV4LParametersFromDict();
 
-    if (contrast_ >= 0)
-    {
-      cam_.set_v4l_parameter("contrast", contrast_);
-    }
 
-    if (saturation_ >= 0)
-    {
-      cam_.set_v4l_parameter("saturation", saturation_);
-    }
 
-    if (sharpness_ >= 0)
-    {
-      cam_.set_v4l_parameter("sharpness", sharpness_);
-    }
-
-    if (gain_ >= 0)
-    {
-      cam_.set_v4l_parameter("gain", gain_);
-    }
-
-    // check auto white balance
-    if (auto_white_balance_)
-    {
-      cam_.set_v4l_parameter("white_balance_temperature_auto", 1);
-    }
-    else
-    {
-      cam_.set_v4l_parameter("white_balance_temperature_auto", 0);
-      cam_.set_v4l_parameter("white_balance_temperature", white_balance_);
-    }
-
-    // check auto exposure
-    if (!autoexposure_)
-    {
-      // turn down exposure control (from max of 3)
-      cam_.set_v4l_parameter("exposure_auto", 1);
-      // change the exposure level
-      cam_.set_v4l_parameter("exposure_absolute", exposure_);
-    }
 
     // check auto focus
     if (autofocus_)
@@ -267,11 +298,6 @@ public:
     }
     return true;
   }
-
-
-
-
-
 
 };
 

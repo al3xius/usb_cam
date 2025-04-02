@@ -1,0 +1,31 @@
+<launch>
+  <node name="usb_cam" pkg="usb_cam" type="usb_cam_node" output="screen">
+    <param name="video_device" value="/dev/video0" />
+    <param name="image_width" value="640" />
+    <param name="image_height" value="480" />
+    <param name="pixel_format" value="mjpeg" />
+    <param name="camera_frame_id" value="usb_cam" />
+    <param name="io_method" value="mmap"/>
+    
+    <!-- Dictionary of arbitrary V4L parameters -->
+    <rosparam param="v4l_params">
+      # Camera control parameters
+      brightness: 150
+      contrast: 50
+      saturation: 75
+      sharpness: 25
+      gain: 30
+      
+      # Special controls
+      autofocus: true
+      focus_absolute: 100
+      exposure_auto: 1
+      exposure_absolute: 250
+      white_balance_temperature_auto: 0
+      white_balance_temperature: 4500
+      
+      # Any other V4L parameter
+      power_line_frequency: 2  # 50Hz
+    </rosparam>
+  </node>
+</launch>

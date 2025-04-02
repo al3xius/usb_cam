@@ -1,0 +1,41 @@
+{
+  "configurations": [
+    {
+      "browse": {
+        "databaseFilename": "${default}",
+        "limitSymbolsToIncludedHeaders": false
+      },
+      "includePath": [
+        "/home/alex/catkin_ws/devel/include/**",
+        "/opt/ros/noetic/include/**",
+        "/home/alex/catkin_ws/src/direct_lidar_odometry/include/**",
+        "/home/alex/catkin_ws/src/direct_visual_lidar_calibration/include/**",
+        "/home/alex/catkin_ws/src/elevation_mapping/elevation_mapping/include/**",
+        "/home/alex/catkin_ws/src/grid_map/grid_map_core/include/**",
+        "/home/alex/catkin_ws/src/grid_map/grid_map_costmap_2d/include/**",
+        "/home/alex/catkin_ws/src/grid_map/grid_map_cv/include/**",
+        "/home/alex/catkin_ws/src/grid_map/grid_map_demos/include/**",
+        "/home/alex/catkin_ws/src/grid_map/grid_map_filters/include/**",
+        "/home/alex/catkin_ws/src/grid_map/grid_map_loader/include/**",
+        "/home/alex/catkin_ws/src/grid_map/grid_map_octomap/include/**",
+        "/home/alex/catkin_ws/src/grid_map/grid_map_pcl/include/**",
+        "/home/alex/catkin_ws/src/grid_map/grid_map_ros/include/**",
+        "/home/alex/catkin_ws/src/grid_map/grid_map_rviz_plugin/include/**",
+        "/home/alex/catkin_ws/src/grid_map/grid_map_sdf/include/**",
+        "/home/alex/catkin_ws/src/grid_map/grid_map_visualization/include/**",
+        "/home/alex/catkin_ws/src/kindr/include/**",
+        "/home/alex/catkin_ws/src/kindr_ros/kindr_ros/include/**",
+        "/home/alex/catkin_ws/src/kindr_ros/kindr_rviz_plugins/include/**",
+        "/home/alex/catkin_ws/src/message_logger/include/**",
+        "/home/alex/catkin_ws/src/kindr_ros/multi_dof_joint_trajectory_rviz_plugins/include/**",
+        "/usr/include/**"
+      ],
+      "name": "ROS",
+      "intelliSenseMode": "gcc-x64",
+      "compilerPath": "/usr/bin/gcc",
+      "cStandard": "gnu11",
+      "cppStandard": "c++14"
+    }
+  ],
+  "version": 4
+}

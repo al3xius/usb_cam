@@ -1,5 +1,5 @@
 <package>
-  <name>usb_cam</name>
+  <name>usb_cam_auto_exposure</name>
   <version>0.3.7</version>
   <description>A ROS Driver for V4L USB Cameras</description>
 
