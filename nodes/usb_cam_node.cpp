@@ -40,6 +40,7 @@
 #include <camera_info_manager/camera_info_manager.h>
 #include <sstream>
 #include <std_srvs/Empty.h>
+#include <std_msgs/String.h>
 
 namespace usb_cam {
 
@@ -61,6 +62,15 @@ public:
   bool autofocus_, custom_auto_exposure_;
   boost::shared_ptr<camera_info_manager::CameraInfoManager> cinfo_;
 
+  // Camera reconnection parameters
+  int reconnect_delay_ms_;
+  int max_reconnect_delay_ms_;
+  bool camera_connected_;
+  
+  // Connection status publisher
+  ros::Publisher camera_status_pub_;
+  std_msgs::String camera_status_msg_;
+  
   UsbCam cam_;
 
   ros::ServiceServer service_start_, service_stop_;
@@ -158,7 +168,10 @@ public:
   }
 
   UsbCamNode() :
-      node_("~")
+      node_("~"), 
+      camera_connected_(false),
+      reconnect_delay_ms_(500),  // Start with a 500ms reconnect delay
+      max_reconnect_delay_ms_(30000)  // Maximum 30 second delay between reconnect attempts
   {
     ROS_INFO("Starting usb_cam node with auto exposure...");
     // advertise the main image topic
@@ -180,9 +193,6 @@ public:
     // parameters for custom auto exposure
     node_.param("custom_auto_exposure", custom_auto_exposure_, false);
     node_.param("custom_auto_exposure_parameter", custom_auto_exposure_parameter_, std::string("exposure_time_absolute"));
-
-
-    
 
     // load the camera info
     node_.param("camera_frame_id", img_.header.frame_id, std::string("head_camera"));
@@ -206,60 +216,121 @@ public:
       cinfo_->setCameraInfo(camera_info);
     }
 
+    // Create a publisher for camera connection status
+    camera_status_pub_ = node_.advertise<std_msgs::String>("camera_status", 1, true);
+    
+    // get reconnection parameters
+    node_.param("reconnect_delay_ms", reconnect_delay_ms_, 500);
+    node_.param("max_reconnect_delay_ms", max_reconnect_delay_ms_, 30000);
+    
+    // Set initial connection status
+    publish_camera_status("CONNECTING");
 
-    ROS_INFO("Starting '%s' (%s) at %dx%d via %s (%s) at %i FPS", camera_name_.c_str(), video_device_name_.c_str(),
-        image_width_, image_height_, io_method_name_.c_str(), pixel_format_name_.c_str(), framerate_);
+    // Try to start the camera
+    initialize_camera();
+  }
 
-    // set the IO method
-    UsbCam::io_method io_method = UsbCam::io_method_from_string(io_method_name_);
-    if(io_method == UsbCam::IO_METHOD_UNKNOWN)
-    {
-      ROS_FATAL("Unknown IO method '%s'", io_method_name_.c_str());
-      node_.shutdown();
-      return;
-    }
+  // Method to publish camera status
+  void publish_camera_status(const std::string& status) {
+    camera_status_msg_.data = status;
+    camera_status_pub_.publish(camera_status_msg_);
+    
+    // Log the status change as well
+    ROS_INFO("Camera status: %s", status.c_str());
+  }
+  
+  // New method to initialize the camera and handle errors gracefully
+  bool initialize_camera() {
+    try {
+      ROS_INFO("Starting '%s' (%s) at %dx%d via %s (%s) at %i FPS", camera_name_.c_str(), video_device_name_.c_str(),
+          image_width_, image_height_, io_method_name_.c_str(), pixel_format_name_.c_str(), framerate_);
 
-    // set the pixel format
-    UsbCam::pixel_format pixel_format = UsbCam::pixel_format_from_string(pixel_format_name_);
-    if (pixel_format == UsbCam::PIXEL_FORMAT_UNKNOWN)
-    {
-      ROS_FATAL("Unknown pixel format '%s'", pixel_format_name_.c_str());
-      node_.shutdown();
-      return;
-    }
-
-    // set the color format
-    UsbCam::color_format color_format = UsbCam::color_format_from_string(color_format_name_);
-    if (color_format == UsbCam::COLOR_FORMAT_UNKNOWN)
-    {
-      ROS_FATAL("Unknown color format '%s'", color_format_name_.c_str());
-      node_.shutdown();
-      return;
-    }
-
-    // start the camera
-    cam_.start(video_device_name_.c_str(), io_method, pixel_format, color_format, image_width_,
-         image_height_, framerate_);
-
-    // Load and apply V4L parameters from dictionary
-    loadV4LParametersFromDict();
-
-
-
-
-    // check auto focus
-    if (autofocus_)
-    {
-      cam_.set_auto_focus(1);
-      cam_.set_v4l_parameter("focus_auto", 1);
-    }
-    else
-    {
-      cam_.set_v4l_parameter("focus_auto", 0);
-      if (focus_ >= 0)
+      // set the IO method
+      UsbCam::io_method io_method = UsbCam::io_method_from_string(io_method_name_);
+      if(io_method == UsbCam::IO_METHOD_UNKNOWN)
       {
-        cam_.set_v4l_parameter("focus_absolute", focus_);
+        ROS_ERROR("Unknown IO method '%s'", io_method_name_.c_str());
+        publish_camera_status("ERROR");
+        return false;
       }
+
+      // set the pixel format
+      UsbCam::pixel_format pixel_format = UsbCam::pixel_format_from_string(pixel_format_name_);
+      if (pixel_format == UsbCam::PIXEL_FORMAT_UNKNOWN)
+      {
+        ROS_ERROR("Unknown pixel format '%s'", pixel_format_name_.c_str());
+        publish_camera_status("ERROR");
+        return false;
+      }
+
+      // set the color format
+      UsbCam::color_format color_format = UsbCam::color_format_from_string(color_format_name_);
+      if (color_format == UsbCam::COLOR_FORMAT_UNKNOWN)
+      {
+        ROS_ERROR("Unknown color format '%s'", color_format_name_.c_str());
+        publish_camera_status("ERROR");
+        return false;
+      }
+
+      // start the camera - wrapped in try/catch to handle failures
+      try {
+        cam_.start(video_device_name_.c_str(), io_method, pixel_format, color_format, image_width_,
+             image_height_, framerate_);
+             
+        // Load and apply V4L parameters from dictionary
+        loadV4LParametersFromDict();
+
+        // Set autofocus if specified
+        if (autofocus_)
+        {
+          cam_.set_auto_focus(1);
+          cam_.set_v4l_parameter("focus_auto", 1);
+        }
+        else
+        {
+          cam_.set_v4l_parameter("focus_auto", 0);
+          if (focus_ >= 0)
+          {
+            cam_.set_v4l_parameter("focus_absolute", focus_);
+          }
+        }
+        
+        // If we got here, camera is working
+        camera_connected_ = true;
+        publish_camera_status("CONNECTED");
+        
+        // Reset reconnect delay when successfully connected
+        reconnect_delay_ms_ = 500;
+        
+        return true;
+      } 
+      catch (std::exception &e) {
+        ROS_ERROR("Exception starting camera: %s", e.what());
+        publish_camera_status("DISCONNECTED");
+        return false;
+      }
+    }
+    catch (std::exception &e) {
+      ROS_ERROR("Exception during camera initialization: %s", e.what());
+      publish_camera_status("ERROR");
+      return false;
+    }
+  }
+  
+  // Try to reconnect to the camera with exponential backoff
+  void attempt_reconnection() {
+    if (camera_connected_) return; // Already connected
+    
+    ROS_INFO("Attempting to reconnect to camera after %d ms", reconnect_delay_ms_);
+    
+    if (initialize_camera()) {
+      ROS_INFO("Successfully reconnected to camera");
+      camera_connected_ = true;
+      publish_camera_status("CONNECTED");
+    } else {
+      ROS_ERROR("Failed to reconnect to camera");
+      // Implement exponential backoff with a ceiling
+      reconnect_delay_ms_ = std::min(reconnect_delay_ms_ * 2, max_reconnect_delay_ms_);
     }
   }
 
@@ -271,7 +342,16 @@ public:
   bool take_and_send_image()
   {
     // grab the image
-    cam_.grab_image(&img_);
+    try {
+      bool success = cam_.grab_image(&img_);
+      if (!success) {
+        return false;
+      }
+    }
+    catch (std::exception &e) {
+      ROS_ERROR("Exception during image capture: %s", e.what());
+      return false;
+    }
 
     // grab the camera info
     sensor_msgs::CameraInfoPtr ci(new sensor_msgs::CameraInfo(cinfo_->getCameraInfo()));
@@ -287,21 +367,41 @@ public:
   bool spin()
   {
     ros::Rate loop_rate(this->framerate_);
+    ros::Time last_reconnect_attempt = ros::Time::now();
+    
     while (node_.ok())
     {
-      if (cam_.is_capturing()) {
-        if (!take_and_send_image()) ROS_WARN("USB camera did not respond in time.");
-      }
-      ros::spinOnce();
-      loop_rate.sleep();
+      // Check if camera is connected
+      if (camera_connected_) {
+        if (cam_.is_capturing()) {
+          if (!take_and_send_image()) {
+            ROS_WARN("Failed to capture image. Camera may be disconnected.");
+            
+            // Check if camera is still there
+            if (!cam_.check_camera_connected()) {
+              ROS_ERROR("Camera disconnected.");
+              camera_connected_ = false;
+              publish_camera_status("DISCONNECTED");
+              cam_.disconnect(); // Clean disconnection
+            }
+          }
+        }
+      } else {
+        // If not connected, attempt to reconnect after delay
+        last_reconnect_attempt = ros::Time::now();          
+        attempt_reconnection();
 
+        // if ((ros::Time::now() - last_reconnect_attempt) > reconnect_duration) {        
+        //   ros::Duration reconnect_duration(reconnect_delay_ms_ / 1000.0);
+
+      }
     }
+
     return true;
   }
+};   
+}     
 
-};
-
-}
 
 int main(int argc, char **argv)
 {

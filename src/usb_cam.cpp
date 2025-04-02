@@ -20,17 +20,7 @@
  *     from this software without specific prior written permission.
  *
  *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
- *  FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
- *  COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
- *  INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
- *  BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- *  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- *  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- *  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
- *  ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- *  POSSIBILITY OF SUCH DAMAGE.
+ *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  *********************************************************************/
 #define __STDC_CONSTANT_MACROS
@@ -63,6 +53,12 @@ static void errno_exit(const char * s)
 {
   ROS_ERROR("%s error %d, %s", s, errno, strerror(errno));
   exit(EXIT_FAILURE);
+}
+
+// Non-fatal error report function
+static void errno_report(const char * s)
+{
+  ROS_ERROR("%s error %d, %s", s, errno, strerror(errno));
 }
 
 static int xioctl(int fd, int request, void * arg)
@@ -618,12 +614,12 @@ int UsbCam::read_frame()
             return 0;
 
           case EIO:
-            /* Could ignore EIO, see spec. */
-
-            /* fall through */
+            /* Could ignore EIO, but may indicate camera disconnect */
+            return -1;
 
           default:
-            errno_exit("read");
+            errno_report("read");
+            return -1;
         }
       }
 
@@ -645,12 +641,12 @@ int UsbCam::read_frame()
             return 0;
 
           case EIO:
-            /* Could ignore EIO, see spec. */
-
-            /* fall through */
+            /* Could ignore EIO, but may indicate camera disconnect */
+            return -1;
 
           default:
-            errno_exit("VIDIOC_DQBUF");
+            errno_report("VIDIOC_DQBUF");
+            return -1;
         }
       }
 
@@ -659,7 +655,10 @@ int UsbCam::read_frame()
       process_image(buffers_[buf.index].start, len, image_);
 
       if (-1 == xioctl(fd_, VIDIOC_QBUF, &buf))
-        errno_exit("VIDIOC_QBUF");
+      {
+        errno_report("VIDIOC_QBUF");
+        return -1;
+      }
 
       break;
 
@@ -677,12 +676,12 @@ int UsbCam::read_frame()
             return 0;
 
           case EIO:
-            /* Could ignore EIO, see spec. */
-
-            /* fall through */
+            /* Could ignore EIO, but may indicate camera disconnect */
+            return -1;
 
           default:
-            errno_exit("VIDIOC_DQBUF");
+            errno_report("VIDIOC_DQBUF");
+            return -1;
         }
       }
 
@@ -695,7 +694,10 @@ int UsbCam::read_frame()
       process_image((void *)buf.m.userptr, len, image_);
 
       if (-1 == xioctl(fd_, VIDIOC_QBUF, &buf))
-        errno_exit("VIDIOC_QBUF");
+      {
+        errno_report("VIDIOC_QBUF");
+        return -1;
+      }
 
       break;
   }
@@ -1123,13 +1125,13 @@ void UsbCam::open_device(void)
   if (-1 == stat(camera_dev_.c_str(), &st))
   {
     ROS_ERROR_STREAM("Cannot identify '" << camera_dev_ << "': " << errno << ", " << strerror(errno));
-    exit(EXIT_FAILURE);
+    throw std::runtime_error("Failed to identify camera device");
   }
 
   if (!S_ISCHR(st.st_mode))
   {
     ROS_ERROR_STREAM(camera_dev_ << " is no device");
-    exit(EXIT_FAILURE);
+    throw std::runtime_error("Camera is not a device");
   }
 
   fd_ = open(camera_dev_.c_str(), O_RDWR /* required */| O_NONBLOCK, 0);
@@ -1137,7 +1139,7 @@ void UsbCam::open_device(void)
   if (-1 == fd_)
   {
     ROS_ERROR_STREAM("Cannot open '" << camera_dev_ << "': " << errno << ", " << strerror(errno));
-    exit(EXIT_FAILURE);
+    throw std::runtime_error("Failed to open camera device");
   }
 }
 
@@ -1147,8 +1149,8 @@ void UsbCam::start(const std::string& dev, io_method io_method,
 		   int framerate)
 {
   camera_dev_ = dev;
-
   io_ = io_method;
+  framerate_ = framerate; // Store framerate for reconnection
   monochrome_ = false;
   if (pixel_format == PIXEL_FORMAT_YUYV)
     pixelformat_ = V4L2_PIX_FMT_YUYV;
@@ -1232,10 +1234,10 @@ void UsbCam::shutdown(void)
   image_ = NULL;
 }
 
-void UsbCam::grab_image(sensor_msgs::Image* msg)
+bool UsbCam::grab_image(sensor_msgs::Image* msg)
 {
   // grab the image
-  grab_image();
+  bool success = grab_image();
   // stamp the image
   msg->header.stamp = ros::Time::now();
   // fill the info
@@ -1254,9 +1256,10 @@ void UsbCam::grab_image(sensor_msgs::Image* msg)
     fillImage(*msg, "rgb8", image_->height, image_->width, 3 * image_->width,
         image_->image);
   }
+  return success;
 }
 
-void UsbCam::grab_image()
+bool UsbCam::grab_image()
 {
   fd_set fds;
   struct timeval tv;
@@ -1266,7 +1269,7 @@ void UsbCam::grab_image()
   FD_SET(fd_, &fds);
 
   /* Timeout. */
-  tv.tv_sec = 5;
+  tv.tv_sec = 1; // Reduced timeout to detect disconnection faster
   tv.tv_usec = 0;
 
   r = select(fd_ + 1, &fds, NULL, NULL, &tv);
@@ -1274,19 +1277,95 @@ void UsbCam::grab_image()
   if (-1 == r)
   {
     if (EINTR == errno)
-      return;
+      return false;
 
-    errno_exit("select");
+    // Don't exit, just report the error
+    errno_report("select");
+    return false;
   }
 
   if (0 == r)
   {
     ROS_ERROR("select timeout");
-    exit(EXIT_FAILURE);
+    return false;
   }
 
-  read_frame();
-  image_->is_new = 1;
+  int frame_result = read_frame();
+  if (frame_result < 0) {
+    // Indicates a more serious error, possibly a disconnection
+    ROS_ERROR_THROTTLE(1, "Error reading frame, possibly camera disconnected");
+    // throw new std::runtime_error("Error reading frame, possibly camera disconnected");
+    return false;
+  }
+
+  if (frame_result > 0) {
+    image_->is_new = 1;
+  }
+
+  return true;
+}
+
+// New method to attempt a clean disconnect and cleanup
+bool UsbCam::disconnect()
+{
+  try {
+    if (is_capturing_) {
+      stop_capturing();
+    }
+    
+    // Only uninit and close if we have a valid file descriptor
+    if (fd_ >= 0) {
+      uninit_device();
+      close_device();
+    }
+    
+    return true;
+  } catch (...) {
+    ROS_ERROR("Exception during camera disconnect cleanup");
+    return false;
+  }
+}
+
+// New method to check if the camera is connected 
+bool UsbCam::check_camera_connected()
+{
+  if (fd_ < 0) return false;
+  
+  struct v4l2_capability cap;
+  if (-1 == xioctl(fd_, VIDIOC_QUERYCAP, &cap)) {
+    return false;
+  }
+  
+  return true;
+}
+
+// New method to attempt reconnecting to the camera
+bool UsbCam::reconnect()
+{
+  ROS_INFO("Attempting to reconnect to camera %s", camera_dev_.c_str());
+  
+  // Make sure we're fully disconnected first
+  disconnect();
+  
+  try {
+    // Try to open the device again
+    open_device();
+    
+    // If we got here, the device is open. Try to initialize it
+    init_device(image_->width, image_->height, framerate_);
+    
+    // Start capturing again
+    start_capturing();
+    
+    ROS_INFO("Successfully reconnected to camera %s", camera_dev_.c_str());
+    return true;
+  } catch (std::exception &e) {
+    ROS_ERROR("Exception during camera reconnect: %s", e.what());
+    return false;
+  } catch (...) {
+    ROS_ERROR("Unknown exception during camera reconnect");
+    return false;
+  }
 }
 
 // enables/disables auto focus

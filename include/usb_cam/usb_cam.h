@@ -87,7 +87,7 @@ class UsbCam {
   void shutdown(void);
 
   // grabs a new image from the camera
-  void grab_image(sensor_msgs::Image* image);
+  bool grab_image(sensor_msgs::Image* image);
 
   // enables/disable auto focus
   void set_auto_focus(int value);
@@ -103,6 +103,11 @@ class UsbCam {
   void stop_capturing(void);
   void start_capturing(void);
   bool is_capturing();
+
+  // New reconnection methods
+  bool check_camera_connected();
+  bool disconnect();
+  bool reconnect();
 
  private:
   typedef struct
@@ -136,7 +141,7 @@ class UsbCam {
   void init_device(int image_width, int image_height, int framerate);
   void close_device(void);
   void open_device(void);
-  void grab_image();
+  bool grab_image();
   bool is_capturing_;
 
 
@@ -157,10 +162,9 @@ class UsbCam {
   int avframe_rgb_size_;
   struct SwsContext *video_sws_;
   camera_image_t *image_;
-
+  int framerate_; // Store framerate for reconnection
 };
 
 }
 
 #endif
-
