@@ -41,7 +41,6 @@
 #include <sstream>
 #include <std_srvs/Empty.h>
 #include <std_msgs/String.h>
-#include <vo_autoexpose/vo_autoexpose.h>
 #include <cv_bridge/cv_bridge.h>
 #include <dynamic_reconfigure/server.h>
 #include <usb_cam_auto_exposure/CameraSettingsConfig.h>
@@ -87,11 +86,6 @@ public:
   // Service to update camera parameters from dictionary
   ros::ServiceServer service_update_params_;
 
-  // Auto exposure parameters
-  int min_exposure_, max_exposure_, target_exposure_;
-  double target_brightness_, brightness_tolerance_;
-  int auto_exposure_frames_skip_;
-  int frames_since_last_adjustment_;
 
   // Method to apply V4L parameters from a dictionary
   void loadV4LParametersFromDict() {
@@ -192,15 +186,8 @@ public:
   UsbCamNode() :
       node_("~"), 
       camera_connected_(false),
-      reconnect_delay_ms_(500),  // Start with a 500ms reconnect delay
-      max_reconnect_delay_ms_(30000),  // Maximum 30 second delay between reconnect attempts
-      min_exposure_(0),
-      max_exposure_(255),
-      target_exposure_(100),
-      target_brightness_(128.0),
-      brightness_tolerance_(10.0),
-      auto_exposure_frames_skip_(5),
-      frames_since_last_adjustment_(0)
+      reconnect_delay_ms_(500),
+      max_reconnect_delay_ms_(3000)
   {
     ROS_INFO("Starting usb_cam node with auto exposure...");
     // advertise the main image topic
@@ -245,23 +232,13 @@ public:
       cinfo_->setCameraInfo(camera_info);
     }
 
-    // Setup exposure controller with default values
-    // We'll update with real camera parameters after connection
-    // setupExposureController();
-
     // Create a publisher for camera connection status
     camera_status_pub_ = node_.advertise<std_msgs::String>("camera_status", 1, true);
     
     // get reconnection parameters
     node_.param("reconnect_delay_ms", reconnect_delay_ms_, 500);
-    node_.param("max_reconnect_delay_ms", max_reconnect_delay_ms_, 30000);
+    node_.param("max_reconnect_delay_ms", max_reconnect_delay_ms_, 1000);
     
-    // Get auto exposure parameters
-    node_.param("target_brightness", target_brightness_, 128.0);
-    node_.param("brightness_tolerance", brightness_tolerance_, 10.0);
-    node_.param("min_exposure", min_exposure_, 0);
-    node_.param("max_exposure", max_exposure_, 255);
-    node_.param("auto_exposure_frames_skip", auto_exposure_frames_skip_, 5);
 
     // Set initial connection status
     publish_camera_status("CONNECTING");
@@ -272,67 +249,6 @@ public:
     // Set up dynamic reconfigure
     f_ = boost::bind(&UsbCamNode::dynamicReconfigureCallback, this, _1, _2);
     server_.setCallback(f_);
-  }
-
-  // New method to set up the exposure controller with camera parameters
-  void setupExposureController() {
-    // Get calibration values from parameters or use defaults
-    Vector5f calib;
-    std::vector<double> calib_values;
-    if (node_.getParam("calibration_values", calib_values) && calib_values.size() == 5) {
-      calib << calib_values[0], calib_values[1], calib_values[2], calib_values[3], calib_values[4];
-    } else {
-      ROS_WARN("Using default calibration values. For best results, provide 'calibration_values' parameter.");
-      calib << 0.0, 0.0, 0.0, 0.0, 0.0;
-    }
-
-    // Get focal length values
-    double F, focal_length_x, focal_length_y;
-    node_.param("focal_length", F, 2.0);
-    
-    // Check if we have calibrated camera info
-    if (cinfo_->isCalibrated()) {
-      sensor_msgs::CameraInfo info = cinfo_->getCameraInfo();
-      focal_length_x = info.K[0]; // fx is in the calibration matrix K[0]
-      focal_length_y = info.K[4]; // fy is in the calibration matrix K[4]
-      
-      // If no values in calibration matrix, try to get from parameters
-      if (focal_length_x == 0.0) {
-        node_.param("focal_length_x", focal_length_x, 865.909537);
-      }
-      if (focal_length_y == 0.0) {
-        node_.param("focal_length_y", focal_length_y, 865.909537);
-      }
-    } else {
-      // No calibration, use parameters or defaults
-      node_.param("focal_length_x", focal_length_x, 865.909537);
-      node_.param("focal_length_y", focal_length_y, 865.909537);
-    }
-
-    // Configure gamma values
-    VectorNcorrect gamma_values;
-    std::vector<double> gamma_params;
-    if (node_.getParam("gamma_values", gamma_params) && gamma_params.size() == gamma_values.size()) {
-      for (size_t i = 0; i < gamma_params.size(); i++) {
-        gamma_values[i] = gamma_params[i];
-      }
-    } else {
-      // gamma_values << 1.0/1.9, 1.0/1.5, 1.0/1.2, 1.0, 1.2, 1.5, 1.9;
-    }
-
-    gamma_values << 0, 1, 2, 3, 4, 5, 6;
-
-    // Get camera identification
-    std::string camera_id;
-    node_.param("camera_id", camera_id, std::string("left"));
-    
-    ROS_INFO("Configuring exposure controller: %s with dimensions %dx%d, F: %.1f, fx: %.1f, fy: %.1f", 
-             camera_id.c_str(), image_width_, image_height_, F, focal_length_x, focal_length_y);
-
-    // Add camera to controller
-    controller.add_camera(camera_id, image_height_, image_width_, FLT_DIG, focal_length_x, focal_length_y, calib);
-    controller.set_gamma_values(gamma_values);
-    controller.init();
   }
 
   // Method to publish camera status
@@ -407,11 +323,6 @@ public:
         // Reset reconnect delay when successfully connected
         reconnect_delay_ms_ = 500;
         
-        // If we successfully connected, update the controller with current parameters
-        // if (camera_connected_) {
-        //   setupExposureController();
-        // }
-        
         return true;
       } 
       catch (std::exception &e) {
@@ -449,114 +360,6 @@ public:
     cam_.shutdown();
   }
 
-  // Calculate the average brightness of an image
-  double calculateAverageBrightness(const sensor_msgs::Image& img) {
-    // Only process a subset of pixels for efficiency
-    const int sample_step = 10; // Sample every 10th pixel in both dimensions
-    long int sum = 0;
-    long int count = 0;
-
-    // Handle different encoding formats
-    if (img.encoding == "rgb8" || img.encoding == "bgr8") {
-      for (size_t y = 0; y < img.height; y += sample_step) {
-        for (size_t x = 0; x < img.width; x += sample_step) {
-          size_t index = y * img.step + x * 3;
-          // Average of RGB channels
-          int r = img.data[index];
-          int g = img.data[index + 1];
-          int b = img.data[index + 2];
-          // Convert RGB to luminance (standard coefficients)
-          int luminance = 0.299 * r + 0.587 * g + 0.114 * b;
-          sum += luminance;
-          count++;
-        }
-      }
-    } else if (img.encoding == "mono8" || img.encoding == "8UC1") {
-      // Grayscale image
-      for (size_t y = 0; y < img.height; y += sample_step) {
-        for (size_t x = 0; x < img.width; x += sample_step) {
-          size_t index = y * img.step + x;
-          sum += img.data[index];
-          count++;
-        }
-      }
-    } else if (img.encoding == "yuyv" || img.encoding == "uyvy") {
-      // YUV format - just sample Y component
-      for (size_t y = 0; y < img.height; y += sample_step) {
-        for (size_t x = 0; x < img.width; x += sample_step) {
-          size_t index = y * img.step + x * 2; // YUV formats have 2 bytes per pixel
-          sum += img.data[index]; // Y component
-          count++;
-        }
-      }
-    } else {
-      // If we can't determine the format, just sample and average all bytes
-      for (size_t y = 0; y < img.height; y += sample_step) {
-        for (size_t x = 0; x < img.width * (img.step / img.width); x += sample_step) {
-          size_t index = y * img.step + x;
-          if (index < img.data.size()) {
-            sum += img.data[index];
-            count++;
-          }
-        }
-      }
-    }
-
-    return count > 0 ? static_cast<double>(sum) / count : 0.0;
-  }
-
-  // Adjust exposure based on image brightness
-  void adjustExposure(double current_brightness) {
-    // Skip if auto exposure is disabled
-    if (!custom_auto_exposure_) return;
-
-    ROS_INFO("Adjusting exposure based on brightness: %.1f, current: %d", current_brightness, current_custom_exposure_);
-
-    // Calculate brightness error
-    double brightness_error = target_brightness_ - current_brightness;
-
-    ROS_INFO("Brightness Error %.1f.", 
-      brightness_error);
-    
-    // Skip adjustment if within tolerance
-    if (std::abs(brightness_error) <= brightness_tolerance_) {
-      return;
-    }
-    
-    // Calculate proportional adjustment
-    double gain = 1.5; // Adjust this value to control responsiveness
-    node_.param("exposure_gain", gain, 1.5); // Allow param override
-    
-    int adjustment = static_cast<int>(brightness_error * gain);
-    
-    // Apply adjustment based on camera type
-    int new_exposure;
-    if (custom_auto_exposure_parameter_ == "exposure_absolute" || 
-        custom_auto_exposure_parameter_ == "exposure") {
-      // Standard behavior - higher value means more exposure
-      new_exposure = current_custom_exposure_ - adjustment;
-    } else {
-      // Some cameras may use inverted values
-      new_exposure = current_custom_exposure_ + adjustment;
-    }
-
-    // Clamp exposure to valid range
-    new_exposure = std::max(min_exposure_, std::min(max_exposure_, new_exposure));
-    
-    // Only update if value changed
-    if (new_exposure != current_custom_exposure_) {
-      ROS_INFO("Adjusting %s: %d -> %d (brightness: %.1f, target: %.1f, error: %.1f)",
-              custom_auto_exposure_parameter_.c_str(), current_custom_exposure_, new_exposure, 
-              current_brightness, target_brightness_, brightness_error);
-      try {
-        cam_.set_v4l_parameter(custom_auto_exposure_parameter_, new_exposure);
-        current_custom_exposure_ = new_exposure;
-      } catch (std::exception &e) {
-        ROS_ERROR("Failed to set exposure: %s", e.what());
-      }
-    }
-  }
-
   bool take_and_send_image()
   {
     // grab the image
@@ -578,55 +381,6 @@ public:
 
     // publish the image
     image_pub_.publish(img_, *ci);
-
-    // Handle auto exposure if enabled
-    // if (custom_auto_exposure_) {
-    //   // frames_since_last_adjustment_++;
-    //   // if (frames_since_last_adjustment_ >= auto_exposure_frames_skip_) {
-    //   //   frames_since_last_adjustment_ = 0;
-    //   //   double avg_brightness = calculateAverageBrightness(img_);
-    //   //   adjustExposure(avg_brightness);
-    //   // }
-
-    //   cv_bridge::CvImagePtr cv_ptr;
-    //   cv_ptr = cv_bridge::toCvCopy(img_,"mono8");
-
-    //   controller.add_frame(0,cv_ptr->image,float(current_custom_exposure_)/1000000,controller.factor_2_dB(current_gain_),cv_ptr->header.seq,cv_ptr->header.stamp.toSec());
-
-
-    //   // Get the new exposure and gain values
-    //   ExposureParameters new_exposure_params = controller.update_params(GRADINFO_SCORE,EV_CORRECTIONS,OPTIFLOW_ESTIM);
-
-    //   int new_gain = static_cast<int>(controller.dB_2_factor(new_exposure_params.gain));
-    //   // convert gain from db to range 0 to 255
-    //   new_gain = std::max(0, std::min(20, new_gain));
-
-    //   int new_exposure = static_cast<int>(1000000*new_exposure_params.exposure);
-    //   new_exposure = std::max(min_exposure_, std::min(max_exposure_, new_exposure));
-
-    //   // update parameters
-    //   if (new_exposure != current_custom_exposure_) {
-    //     ROS_INFO("Updating exposure to %d", new_exposure);
-    //     cam_.set_v4l_parameter(custom_auto_exposure_parameter_, new_exposure);
-    //     current_custom_exposure_ = new_exposure;
-    //   }
-
-    //   if (new_gain != current_gain_) {
-    //     ROS_INFO("Updating gain to %d", new_gain);
-    //     cam_.set_v4l_parameter("gain", new_gain);
-    //     current_gain_ = new_gain;
-    //   }
-    // }
-
-    // Update dynamic reconfigure with current values
-    // This ensures the GUI always shows the actual camera settings
-    // usb_cam::CameraSettingConfig config;
-    // config.exposure = current_custom_exposure_;
-    // config.gain = current_gain_;
-    // config.auto_exposure = custom_auto_exposure_;
-    // config.target_brightness = target_brightness_;
-    // config.brightness_tolerance = brightness_tolerance_;
-    // server_.updateConfig(config);
 
     return true;
   }
@@ -658,8 +412,11 @@ public:
         last_reconnect_attempt = ros::Time::now();          
         attempt_reconnection();
 
-        // if ((ros::Time::now() - last_reconnect_attempt) > reconnect_duration) {        
-        //   ros::Duration reconnect_duration(reconnect_delay_ms_ / 1000.0);
+        // Add a delay before the next attempt
+        if (ros::Time::now() - last_reconnect_attempt > ros::Duration(reconnect_delay_ms_ / 1000.0)) {
+          attempt_reconnection();
+          last_reconnect_attempt = ros::Time::now();
+        }
       }
       ros::spinOnce();
       loop_rate.sleep();
@@ -668,11 +425,10 @@ public:
     return true;
   }
 
-  // Dynamic reconfigure callback
+  // Camera Config callback
   void dynamicReconfigureCallback(usb_cam_auto_exposure::CameraSettingsConfig &config, uint32_t level) {
-    ROS_INFO("Dynamic reconfigure called with level %d", level);
-    
     try {
+      // TODO
       cam_.set_v4l_parameter(custom_auto_exposure_parameter_, config.exposure);
       current_custom_exposure_ = config.exposure;
     } catch (std::exception &e) {
