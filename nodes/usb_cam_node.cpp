@@ -52,8 +52,7 @@ class UsbCamNode
 public:
   // private ROS node handle
   ros::NodeHandle node_;
-  ExpGainController controller; 
-
+  
   // shared image message
   sensor_msgs::Image img_;
   image_transport::CameraPublisher image_pub_;

@@ -40,7 +40,7 @@ generate_dynamic_reconfigure_options(
 ## DEPENDS: system dependencies of this project that dependent projects also need
 catkin_package(
   INCLUDE_DIRS include
-  LIBRARIES usb_cam_auto_exposure vo_autoexpose
+  LIBRARIES usb_cam_auto_exposure
   CATKIN_DEPENDS roscpp std_msgs std_srvs sensor_msgs camera_info_manager dynamic_reconfigure
 )
 
@@ -61,8 +61,6 @@ include_directories(include
 ## Build the USB camera library
 add_library(${PROJECT_NAME} 
   src/usb_cam.cpp
-  src/vo_autoexpose.cpp 
-  include/vo_autoexpose/vo_autoexpose.h 
 )
 
 add_dependencies(${PROJECT_NAME} ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
